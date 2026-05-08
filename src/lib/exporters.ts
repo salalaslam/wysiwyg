@@ -9,6 +9,8 @@ import {
   type IParagraphOptions,
 } from "docx";
 
+import { isStandaloneHtmlDocument } from "@/lib/html-templates";
+
 function downloadBlob(blob: Blob, filename: string) {
   saveAs(blob, filename);
 }
@@ -50,20 +52,27 @@ function toAlignment(style: string) {
   return AlignmentType.LEFT;
 }
 
-function htmlToParagraphs(html: string) {
-  const parser = new DOMParser();
-  const document = parser.parseFromString(html, "text/html");
-  const bodyChildren = Array.from(document.body.children);
-
-  const paragraphs = bodyChildren.flatMap((element) => {
-    const text = element.textContent?.trim() ?? "";
-    const alignment = toAlignment(element.getAttribute("style") ?? "");
-
-    if (!text) {
-      return [];
+function hasDirectTextContent(element: Element) {
+  return Array.from(element.childNodes).some((node) => {
+    if (node.nodeType !== Node.TEXT_NODE) {
+      return false;
     }
 
-    if (element.tagName === "H1") {
+    return (node.textContent ?? "").trim().length > 0;
+  });
+}
+
+function createParagraphsFromElement(element: Element, inheritedStyle = ""): Paragraph[] {
+  const style = `${inheritedStyle} ${element.getAttribute("style") ?? ""}`;
+  const alignment = toAlignment(style);
+  const text = element.textContent?.replace(/\s+/g, " ").trim() ?? "";
+
+  if (!text && element.children.length === 0) {
+    return [];
+  }
+
+  switch (element.tagName) {
+    case "H1":
       return [
         paragraphFromText(text, {
           heading: HeadingLevel.HEADING_1,
@@ -71,9 +80,7 @@ function htmlToParagraphs(html: string) {
           spacing: { after: 220 },
         }),
       ];
-    }
-
-    if (element.tagName === "H2") {
+    case "H2":
       return [
         paragraphFromText(text, {
           heading: HeadingLevel.HEADING_2,
@@ -81,9 +88,22 @@ function htmlToParagraphs(html: string) {
           spacing: { before: 220, after: 120 },
         }),
       ];
-    }
-
-    if (element.tagName === "BLOCKQUOTE") {
+    case "H3":
+      return [
+        paragraphFromText(text, {
+          heading: HeadingLevel.HEADING_3,
+          alignment,
+          spacing: { before: 160, after: 100 },
+        }),
+      ];
+    case "P":
+      return [
+        paragraphFromText(text, {
+          alignment,
+          spacing: { after: 120 },
+        }),
+      ];
+    case "BLOCKQUOTE":
       return [
         paragraphFromText(text, {
           alignment,
@@ -91,9 +111,8 @@ function htmlToParagraphs(html: string) {
           spacing: { before: 120, after: 120 },
         }),
       ];
-    }
-
-    if (element.tagName === "UL" || element.tagName === "OL") {
+    case "UL":
+    case "OL":
       return Array.from(element.children)
         .filter((child) => child.tagName === "LI")
         .map((child, index) => {
@@ -106,21 +125,59 @@ function htmlToParagraphs(html: string) {
             spacing: { after: 80 },
           });
         });
-    }
+    case "BR":
+      return [];
+    default: {
+      if (element.children.length > 0) {
+        const nested = Array.from(element.children).flatMap((child) =>
+          createParagraphsFromElement(child, style)
+        );
 
-    return [
-      paragraphFromText(text, {
-        alignment,
-        spacing: { after: 120 },
-      }),
-    ];
-  });
+        if (nested.length > 0) {
+          if (hasDirectTextContent(element) && !["BODY", "HTML"].includes(element.tagName)) {
+            return [
+              paragraphFromText(text, {
+                alignment,
+                spacing: { after: 120 },
+              }),
+              ...nested,
+            ];
+          }
+
+          return nested;
+        }
+      }
+
+      return text
+        ? [
+            paragraphFromText(text, {
+              alignment,
+              spacing: { after: 120 },
+            }),
+          ]
+        : [];
+    }
+  }
+}
+
+function htmlToParagraphs(html: string) {
+  const parser = new DOMParser();
+  const document = parser.parseFromString(html, "text/html");
+  const bodyChildren = Array.from(document.body.children);
+
+  const paragraphs = bodyChildren.flatMap((element) => createParagraphsFromElement(element));
 
   return paragraphs.length ? paragraphs : [paragraphFromText("Document export")];
 }
 
 export function exportHtmlDocument(html: string, title: string) {
   const filename = `${sanitizeFilename(title)}.html`;
+
+  if (isStandaloneHtmlDocument(html)) {
+    downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), filename);
+    return;
+  }
+
   const shell = `<!DOCTYPE html>
 <html lang="en">
   <head>

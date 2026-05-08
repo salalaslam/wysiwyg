@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -10,13 +10,15 @@ import {
   Download,
   Eye,
   FileOutput,
-  FileText,
+  FileUp,
+  LayoutTemplate,
   LoaderCircle,
   PenSquare,
   SendHorizonal,
   Sparkles,
 } from "lucide-react";
 
+import { HtmlTemplateNode } from "@/components/tiptap/html-template-node";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,9 +32,25 @@ import {
   type DemoPrompt,
 } from "@/lib/demo-data";
 import { exportDocxDocument, exportHtmlDocument } from "@/lib/exporters";
+import {
+  attachedResumeTemplateHtml,
+  isStandaloneHtmlDocument,
+  sanitizeImportedHtml,
+} from "@/lib/html-templates";
 import { cn } from "@/lib/utils";
 
 type ViewMode = "preview" | "edit";
+
+type TemplateNodeContent = {
+  type: "doc";
+  content: Array<{
+    type: "htmlTemplate";
+    attrs: {
+      html: string;
+      title: string;
+    };
+  }>;
+};
 
 function createMessage(role: ChatMessage["role"], content: string): ChatMessage {
   return {
@@ -43,8 +61,41 @@ function createMessage(role: ChatMessage["role"], content: string): ChatMessage 
 }
 
 function extractTitle(html: string) {
+  const documentTitle = html.match(/<title[^>]*>(.*?)<\/title>/i);
+  if (documentTitle?.[1]) {
+    return documentTitle[1].replace(/<[^>]+>/g, "").trim();
+  }
+
   const match = html.match(/<h1[^>]*>(.*?)<\/h1>/i);
   return match?.[1]?.replace(/<[^>]+>/g, "").trim() || "Draftroom Export";
+}
+
+function createEditorContent(html: string): string | TemplateNodeContent {
+  if (isStandaloneHtmlDocument(html)) {
+    return {
+      type: "doc",
+      content: [
+        {
+          type: "htmlTemplate",
+          attrs: {
+            html,
+            title: extractTitle(html),
+          },
+        },
+      ],
+    };
+  }
+
+  return html;
+}
+
+function editorContainsTemplateHtml(editorHtml: string, editorJson: { content?: Array<{ type?: string; attrs?: { html?: string } }> }) {
+  if (!isStandaloneHtmlDocument(editorHtml)) {
+    return false;
+  }
+
+  const firstNode = editorJson.content?.[0];
+  return firstNode?.type === "htmlTemplate" && firstNode.attrs?.html === editorHtml;
 }
 
 function responseForCustomPrompt(input: string): { message: string; html: string } {
@@ -163,7 +214,10 @@ export function Workspace() {
   const [isPending, startTransition] = useTransition();
   const [documentHtml, setDocumentHtml] = useState(initialDocumentHtml);
   const [title, setTitle] = useState("Prior Authorization Draft");
-  const [note, setNote] = useState("Internal note: no auth, no STT, demo-only actions.");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingEditorHtmlRef = useRef<string | null>(null);
+
+  const isTemplateDocument = useMemo(() => isStandaloneHtmlDocument(documentHtml), [documentHtml]);
 
   const editor = useEditor({
     immediatelyRender: false,
@@ -175,6 +229,7 @@ export function Workspace() {
       TextAlign.configure({
         types: ["heading", "paragraph"],
       }),
+      HtmlTemplateNode,
     ],
     editorProps: {
       attributes: {
@@ -182,26 +237,69 @@ export function Workspace() {
           "tiptap min-h-[640px] px-8 py-8 text-[15px] leading-7 text-[#f6f1e8] focus:outline-none md:px-12 md:py-10",
       },
     },
-    content: initialDocumentHtml,
+    content: createEditorContent(initialDocumentHtml),
     onUpdate: ({ editor: instance }) => {
+      const json = instance.getJSON() as { content?: Array<{ type?: string; attrs?: { html?: string; title?: string } }> };
+      const firstNode = json.content?.[0];
+
+      if (firstNode?.type === "htmlTemplate" && typeof firstNode.attrs?.html === "string") {
+        setDocumentHtml(firstNode.attrs.html);
+        setTitle(extractTitle(firstNode.attrs.html));
+        return;
+      }
+
       const html = instance.getHTML();
       setDocumentHtml(html);
       setTitle(extractTitle(html));
     },
   });
 
+  const syncEditorContent = useCallback(
+    (nextHtml: string) => {
+      pendingEditorHtmlRef.current = nextHtml;
+
+      if (!editor) {
+        return;
+      }
+
+      queueMicrotask(() => {
+        if (!editor || editor.isDestroyed) {
+          return;
+        }
+
+        if (pendingEditorHtmlRef.current !== nextHtml) {
+          return;
+        }
+
+        const currentHtml = editor.getHTML();
+        const currentJson = editor.getJSON() as { content?: Array<{ type?: string; attrs?: { html?: string } }> };
+
+        if (editorContainsTemplateHtml(nextHtml, currentJson)) {
+          pendingEditorHtmlRef.current = null;
+          return;
+        }
+
+        if (!isStandaloneHtmlDocument(nextHtml) && currentHtml === nextHtml) {
+          pendingEditorHtmlRef.current = null;
+          return;
+        }
+
+        editor.commands.setContent(createEditorContent(nextHtml), {
+          emitUpdate: false,
+        });
+        pendingEditorHtmlRef.current = null;
+      });
+    },
+    [editor]
+  );
+
   useEffect(() => {
-    if (!editor) {
+    if (!editor || !pendingEditorHtmlRef.current) {
       return;
     }
 
-    const current = editor.getHTML();
-    if (current !== documentHtml) {
-      editor.commands.setContent(documentHtml, {
-        emitUpdate: false,
-      });
-    }
-  }, [documentHtml, editor]);
+    syncEditorContent(pendingEditorHtmlRef.current);
+  }, [editor, syncEditorContent]);
 
   const stats = useMemo(() => {
     const text = documentHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -218,13 +316,63 @@ export function Workspace() {
       createMessage("assistant", assistantText),
     ]);
     setDocumentHtml(nextHtml);
+    setTitle(extractTitle(nextHtml));
     setViewMode("preview");
+    syncEditorContent(nextHtml);
+  };
+
+  const applyImportedTemplate = (html: string, userText: string, assistantText: string) => {
+    const sanitizedHtml = sanitizeImportedHtml(html);
+
+    setMessages((current) => [
+      ...current,
+      createMessage("user", userText),
+      createMessage("assistant", assistantText),
+    ]);
+    setDocumentHtml(sanitizedHtml);
+    setTitle(extractTitle(sanitizedHtml));
+    setViewMode("edit");
+    syncEditorContent(sanitizedHtml);
   };
 
   const handlePromptSelect = (prompt: DemoPrompt) => {
     startTransition(() => {
       applyAssistantResult(prompt.intent, prompt.response, prompt.html);
     });
+  };
+
+  const handleLoadAttachedTemplate = () => {
+    startTransition(() => {
+      applyImportedTemplate(
+        attachedResumeTemplateHtml,
+        "Load the attached two-column resume HTML inside the editor.",
+        "Loaded the two-column HTML as a rendered template block inside TipTap. It stays visually faithful to the original layout and can be previewed or exported from here."
+      );
+    });
+  };
+
+  const handleOpenFilePicker = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    const html = await file.text();
+
+    startTransition(() => {
+      applyImportedTemplate(
+        html,
+        `Import HTML file: ${file.name}`,
+        `Imported ${file.name} into TipTap as a rendered HTML template block.`
+      );
+    });
+
+    event.target.value = "";
   };
 
   const handleSubmit = () => {
@@ -251,6 +399,15 @@ export function Workspace() {
 
   return (
     <main className="grain-overlay min-h-screen overflow-hidden bg-transparent px-4 py-4 text-[#f6f1e8] md:px-6 md:py-6">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".html,text/html"
+        className="hidden"
+        onChange={(event) => {
+          void handleImportFile(event);
+        }}
+      />
       <div className="mx-auto flex min-h-[calc(100vh-2rem)] max-w-[1600px] flex-col overflow-hidden rounded-[28px] border border-white/10 bg-[#090d15]/90 shadow-[0_30px_120px_rgba(0,0,0,0.45)] backdrop-blur md:min-h-[calc(100vh-3rem)]">
         <header className="flex flex-wrap items-center gap-4 border-b border-white/10 px-5 py-4 md:px-6">
           <div>
@@ -284,6 +441,25 @@ export function Workspace() {
                     </p>
                   </div>
                 </div>
+              </div>
+
+              <div className="mt-4 grid gap-3">
+                <Button
+                  variant="outline"
+                  className="justify-between border-white/10 bg-black/20 text-[#f6f1e8] hover:bg-white/8"
+                  onClick={handleLoadAttachedTemplate}
+                >
+                  Load attached two-column HTML
+                  <LayoutTemplate />
+                </Button>
+                <Button
+                  variant="outline"
+                  className="justify-between border-white/10 bg-black/20 text-[#f6f1e8] hover:bg-white/8"
+                  onClick={handleOpenFilePicker}
+                >
+                  Import another HTML file
+                  <FileUp />
+                </Button>
               </div>
 
               <div className="mt-5 grid gap-3">
@@ -364,7 +540,7 @@ export function Workspace() {
 
               <div className="mt-4">
                 <FormattingToolbar
-                  disabled={!editor}
+                  disabled={!editor || isTemplateDocument}
                   mode={viewMode}
                   onPreview={() => setViewMode("preview")}
                   onEdit={() => setViewMode("edit")}
@@ -378,60 +554,34 @@ export function Workspace() {
                   onToggleHeading={() => editor?.chain().focus().toggleHeading({ level: 1 }).run()}
                 />
               </div>
+              {isTemplateDocument ? (
+                <p className="mt-3 text-sm text-[#95a3b6]">
+                  Full HTML template loaded. TipTap shows it as a rendered block so the two-column structure stays intact.
+                </p>
+              ) : null}
             </div>
 
-            <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px]">
-              <div className="min-h-0 overflow-y-auto p-5 md:p-6">
-                <div className="mx-auto w-full max-w-4xl rounded-[28px] border border-white/10 bg-[#f5efe5] p-3 shadow-[0_25px_80px_rgba(0,0,0,0.35)] md:p-4">
-                  <div className="rounded-[22px] bg-[linear-gradient(180deg,#1c2130_0%,#101520_100%)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-                    {viewMode === "preview" ? (
+            <div className="min-h-0 flex-1 overflow-y-auto p-5 md:p-6">
+              <div className="mx-auto w-full max-w-4xl rounded-[28px] border border-white/10 bg-[#f5efe5] p-3 shadow-[0_25px_80px_rgba(0,0,0,0.35)] md:p-4">
+                <div className="rounded-[22px] bg-[linear-gradient(180deg,#1c2130_0%,#101520_100%)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  {viewMode === "preview" ? (
+                    isTemplateDocument ? (
+                      <iframe
+                        title={title}
+                        srcDoc={documentHtml}
+                        className="h-[780px] w-full rounded-[22px] border-0 bg-white"
+                      />
+                    ) : (
                       <article
                         className="export-surface min-h-[680px] px-8 py-8 text-[15px] leading-7 text-[#f6f1e8] md:px-12 md:py-10"
                         dangerouslySetInnerHTML={{ __html: documentHtml }}
                       />
-                    ) : (
-                      <EditorContent editor={editor} />
-                    )}
-                  </div>
+                    )
+                  ) : (
+                    <EditorContent editor={editor} />
+                  )}
                 </div>
               </div>
-
-              <aside className="border-t border-white/10 p-5 xl:border-t-0 xl:border-l xl:p-6">
-                <div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
-                  <div className="flex items-center gap-2 text-[#fff8ef]">
-                    <FileText className="size-4 text-[#dd8c5b]" />
-                    <h2 className="text-sm font-medium">Workspace notes</h2>
-                  </div>
-                  <p className="mt-2 text-sm leading-6 text-[#95a3b6]">
-                    Keep a small operational note here while the document remains editable on the main canvas.
-                  </p>
-                  <Textarea
-                    value={note}
-                    onChange={(event) => setNote(event.target.value)}
-                    className="mt-4 min-h-36 resize-none border-white/10 bg-black/20 text-[#f6f1e8]"
-                  />
-                </div>
-
-                <div className="mt-4 rounded-[24px] border border-white/10 bg-white/5 p-5">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium text-[#fff8ef]">Export targets</p>
-                      <p className="mt-1 text-sm text-[#95a3b6]">HTML for browser review, DOCX for editable handoff.</p>
-                    </div>
-                    <Download className="size-4 text-[#dd8c5b]" />
-                  </div>
-                  <div className="mt-4 grid gap-3">
-                    <Button variant="outline" className="justify-between border-white/10 bg-black/20 text-[#f6f1e8]" onClick={handleExportHtml}>
-                      Export current draft as HTML
-                      <FileOutput />
-                    </Button>
-                    <Button className="justify-between bg-[#dd8c5b] text-[#1a130d] hover:bg-[#e59a6c]" onClick={() => void handleExportDocx()}>
-                      Export current draft as DOCX
-                      <Download />
-                    </Button>
-                  </div>
-                </div>
-              </aside>
             </div>
           </section>
         </section>
