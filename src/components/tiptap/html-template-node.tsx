@@ -6,6 +6,13 @@ import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tip
 
 import { cn } from "@/lib/utils";
 
+export const TEMPLATE_COMMAND_EVENT = "draftroom:template-command";
+
+type TemplateCommandDetail = {
+  command: "bold" | "bulletList" | "heading1" | "align";
+  align?: "left" | "center" | "right";
+};
+
 function serializeIframeDocument(document: Document) {
   const doctype = document.doctype;
   const doctypeString = doctype
@@ -32,6 +39,7 @@ function HtmlTemplateView({ node, selected, updateAttributes }: NodeViewProps) {
   const latestHtmlRef = useRef<string | null>(null);
   const syncTimeoutRef = useRef<number | null>(null);
   const observerRef = useRef<MutationObserver | null>(null);
+  const selectionRangeRef = useRef<Range | null>(null);
 
   const clearScheduledSync = useCallback(() => {
     if (syncTimeoutRef.current !== null) {
@@ -90,6 +98,71 @@ function HtmlTemplateView({ node, selected, updateAttributes }: NodeViewProps) {
     }
   }, []);
 
+  const restoreSelection = useCallback((document: Document) => {
+    const savedRange = selectionRangeRef.current;
+    if (!savedRange) {
+      return false;
+    }
+
+    const selection = document.getSelection();
+    if (!selection) {
+      return false;
+    }
+
+    selection.removeAllRanges();
+    selection.addRange(savedRange);
+    return true;
+  }, []);
+
+  const cacheSelection = useCallback((document: Document) => {
+    const selection = document.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return;
+    }
+
+    selectionRangeRef.current = selection.getRangeAt(0).cloneRange();
+  }, []);
+
+  const runTemplateCommand = useCallback(
+    (detail: TemplateCommandDetail) => {
+      const document = iframeRef.current?.contentDocument;
+      const iframeWindow = iframeRef.current?.contentWindow;
+      if (!document || !iframeWindow) {
+        return;
+      }
+
+      iframeWindow.focus();
+      restoreSelection(document);
+
+      switch (detail.command) {
+        case "bold":
+          document.execCommand("bold");
+          break;
+        case "bulletList":
+          document.execCommand("insertUnorderedList");
+          break;
+        case "heading1":
+          document.execCommand("formatBlock", false, "h1");
+          break;
+        case "align": {
+          const commandMap = {
+            left: "justifyLeft",
+            center: "justifyCenter",
+            right: "justifyRight",
+          } as const;
+          if (detail.align) {
+            document.execCommand(commandMap[detail.align]);
+          }
+          break;
+        }
+      }
+
+      cacheSelection(document);
+      scheduleIframeSync(document);
+    },
+    [cacheSelection, restoreSelection, scheduleIframeSync]
+  );
+
   useEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe) {
@@ -121,10 +194,17 @@ function HtmlTemplateView({ node, selected, updateAttributes }: NodeViewProps) {
         scheduleIframeSync(document);
       };
 
+      const handleSelectionChange = () => {
+        cacheSelection(document);
+      };
+
       document.addEventListener("input", handleInput);
       document.addEventListener("keyup", handleInput);
       document.addEventListener("paste", handleInput);
       document.addEventListener("cut", handleInput);
+      document.addEventListener("mouseup", handleSelectionChange);
+      document.addEventListener("keyup", handleSelectionChange);
+      document.addEventListener("selectionchange", handleSelectionChange);
 
       observerRef.current = new MutationObserver(() => {
         resizeIframe(document);
@@ -141,7 +221,11 @@ function HtmlTemplateView({ node, selected, updateAttributes }: NodeViewProps) {
         document.removeEventListener("keyup", handleInput);
         document.removeEventListener("paste", handleInput);
         document.removeEventListener("cut", handleInput);
+        document.removeEventListener("mouseup", handleSelectionChange);
+        document.removeEventListener("selectionchange", handleSelectionChange);
       };
+
+      cacheSelection(document);
     };
 
     const handleLoad = () => {
@@ -161,7 +245,20 @@ function HtmlTemplateView({ node, selected, updateAttributes }: NodeViewProps) {
       iframe.removeEventListener("load", handleLoad);
       cleanupDocumentState();
     };
-  }, [clearScheduledSync, enableDocumentEditing, html, resizeIframe, scheduleIframeSync]);
+  }, [cacheSelection, clearScheduledSync, enableDocumentEditing, html, resizeIframe, scheduleIframeSync]);
+
+  useEffect(() => {
+    const handleCommandEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<TemplateCommandDetail>;
+      runTemplateCommand(customEvent.detail);
+    };
+
+    window.addEventListener(TEMPLATE_COMMAND_EVENT, handleCommandEvent as EventListener);
+
+    return () => {
+      window.removeEventListener(TEMPLATE_COMMAND_EVENT, handleCommandEvent as EventListener);
+    };
+  }, [runTemplateCommand]);
 
   return (
     <NodeViewWrapper

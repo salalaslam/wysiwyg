@@ -18,7 +18,7 @@ import {
   Sparkles,
 } from "lucide-react";
 
-import { HtmlTemplateNode } from "@/components/tiptap/html-template-node";
+import { HtmlTemplateNode, TEMPLATE_COMMAND_EVENT } from "@/components/tiptap/html-template-node";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -397,6 +397,50 @@ export function Workspace() {
     await exportDocxDocument(documentHtml, title);
   };
 
+  const dispatchTemplateCommand = useCallback(
+    (detail: { command: "bold" | "bulletList" | "heading1" | "align"; align?: "left" | "center" | "right" }) => {
+      if (!isTemplateDocument) {
+        return false;
+      }
+
+      window.dispatchEvent(new CustomEvent(TEMPLATE_COMMAND_EVENT, { detail }));
+      return true;
+    },
+    [isTemplateDocument]
+  );
+
+  const handleToggleHeading = () => {
+    if (dispatchTemplateCommand({ command: "heading1" })) {
+      return;
+    }
+
+    editor?.chain().focus().toggleHeading({ level: 1 }).run();
+  };
+
+  const handleToggleBold = () => {
+    if (dispatchTemplateCommand({ command: "bold" })) {
+      return;
+    }
+
+    editor?.chain().focus().toggleBold().run();
+  };
+
+  const handleToggleBullet = () => {
+    if (dispatchTemplateCommand({ command: "bulletList" })) {
+      return;
+    }
+
+    editor?.chain().focus().toggleBulletList().run();
+  };
+
+  const handleSetAlign = (align: "left" | "center" | "right") => {
+    if (dispatchTemplateCommand({ command: "align", align })) {
+      return;
+    }
+
+    editor?.chain().focus().setTextAlign(align).run();
+  };
+
   return (
     <main className="grain-overlay min-h-screen overflow-hidden bg-transparent px-4 py-4 text-[#f6f1e8] md:px-6 md:py-6">
       <input
@@ -540,7 +584,7 @@ export function Workspace() {
 
               <div className="mt-4">
                 <FormattingToolbar
-                  disabled={!editor || isTemplateDocument}
+                  disabled={!editor}
                   mode={viewMode}
                   onPreview={() => setViewMode("preview")}
                   onEdit={() => setViewMode("edit")}
@@ -548,10 +592,10 @@ export function Workspace() {
                   onExportDocx={() => {
                     void handleExportDocx();
                   }}
-                  onSetAlign={(align) => editor?.chain().focus().setTextAlign(align).run()}
-                  onToggleBold={() => editor?.chain().focus().toggleBold().run()}
-                  onToggleBullet={() => editor?.chain().focus().toggleBulletList().run()}
-                  onToggleHeading={() => editor?.chain().focus().toggleHeading({ level: 1 }).run()}
+                  onSetAlign={handleSetAlign}
+                  onToggleBold={handleToggleBold}
+                  onToggleBullet={handleToggleBullet}
+                  onToggleHeading={handleToggleHeading}
                 />
               </div>
               {isTemplateDocument ? (
