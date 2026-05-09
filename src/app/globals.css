@@ -162,6 +162,17 @@
   outline: none;
 }
 
+.lexical-editor {
+  min-height: 100%;
+  outline: none;
+}
+
+.lexical-placeholder {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
 .tiptap p.is-editor-empty:first-child::before {
   color: var(--muted-foreground);
   content: attr(data-placeholder);
@@ -171,6 +182,7 @@
 }
 
 .tiptap h1,
+.lexical-editor h1,
 .export-surface h1 {
   font-family: var(--font-heading);
   font-size: clamp(2rem, 3vw, 2.8rem);
@@ -179,6 +191,7 @@
 }
 
 .tiptap h2,
+.lexical-editor h2,
 .export-surface h2 {
   font-family: var(--font-heading);
   font-size: 1.5rem;
@@ -188,6 +201,7 @@
 }
 
 .tiptap p,
+.lexical-editor p,
 .export-surface p {
   color: rgba(246, 241, 232, 0.88);
   line-height: 1.75;
@@ -196,18 +210,22 @@
 
 .tiptap ul,
 .tiptap ol,
+.lexical-editor ul,
+.lexical-editor ol,
 .export-surface ul,
 .export-surface ol {
   margin: 0 0 1rem 1.4rem;
 }
 
 .tiptap li,
+.lexical-editor li,
 .export-surface li {
   margin-bottom: 0.45rem;
   line-height: 1.65;
 }
 
 .tiptap blockquote,
+.lexical-editor blockquote,
 .export-surface blockquote {
   border-left: 3px solid rgba(212, 180, 131, 0.45);
   color: rgba(246, 241, 232, 0.72);
@@ -216,16 +234,24 @@
 }
 
 .tiptap strong,
+.lexical-editor strong,
 .export-surface strong {
   color: #fff9f1;
 }
 
+.lexical-text-bold {
+  color: #fff9f1;
+  font-weight: 700;
+}
+
 .tiptap [style*="text-align: center"],
+.lexical-editor [style*="text-align: center"],
 .export-surface [style*="text-align: center"] {
   text-align: center;
 }
 
 .tiptap [style*="text-align: right"],
+.lexical-editor [style*="text-align: right"],
 .export-surface [style*="text-align: right"] {
   text-align: right;
 }

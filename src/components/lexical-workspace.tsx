@@ -2,10 +2,32 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
-import { EditorContent, useEditor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import Placeholder from "@tiptap/extension-placeholder";
-import TextAlign from "@tiptap/extension-text-align";
+import { $generateHtmlFromNodes, $generateNodesFromDOM } from "@lexical/html";
+import {
+  INSERT_UNORDERED_LIST_COMMAND,
+  ListItemNode,
+  ListNode,
+} from "@lexical/list";
+import { LexicalComposer } from "@lexical/react/LexicalComposer";
+import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
+import { ContentEditable } from "@lexical/react/LexicalContentEditable";
+import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
+import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
+import { ListPlugin } from "@lexical/react/LexicalListPlugin";
+import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
+import { RichTextPlugin } from "@lexical/react/LexicalRichTextPlugin";
+import { $createHeadingNode, HeadingNode, QuoteNode } from "@lexical/rich-text";
+import { $setBlocksType } from "@lexical/selection";
+import {
+  $createParagraphNode,
+  $getRoot,
+  $getSelection,
+  $insertNodes,
+  FORMAT_ELEMENT_COMMAND,
+  FORMAT_TEXT_COMMAND,
+  type ElementFormatType,
+  type LexicalEditor,
+} from "lexical";
 import {
   Bot,
   Download,
@@ -19,7 +41,6 @@ import {
   Sparkles,
 } from "lucide-react";
 
-import { HtmlTemplateNode, TEMPLATE_COMMAND_EVENT } from "@/components/tiptap/html-template-node";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,17 +63,6 @@ import { cn } from "@/lib/utils";
 
 type ViewMode = "preview" | "edit";
 
-type TemplateNodeContent = {
-  type: "doc";
-  content: Array<{
-    type: "htmlTemplate";
-    attrs: {
-      html: string;
-      title: string;
-    };
-  }>;
-};
-
 function createMessage(role: ChatMessage["role"], content: string): ChatMessage {
   return {
     id: `${role}-${crypto.randomUUID()}`,
@@ -69,34 +79,6 @@ function extractTitle(html: string) {
 
   const match = html.match(/<h1[^>]*>(.*?)<\/h1>/i);
   return match?.[1]?.replace(/<[^>]+>/g, "").trim() || "Draftroom Export";
-}
-
-function createEditorContent(html: string): string | TemplateNodeContent {
-  if (isStandaloneHtmlDocument(html)) {
-    return {
-      type: "doc",
-      content: [
-        {
-          type: "htmlTemplate",
-          attrs: {
-            html,
-            title: extractTitle(html),
-          },
-        },
-      ],
-    };
-  }
-
-  return html;
-}
-
-function editorContainsTemplateHtml(editorHtml: string, editorJson: { content?: Array<{ type?: string; attrs?: { html?: string } }> }) {
-  if (!isStandaloneHtmlDocument(editorHtml)) {
-    return false;
-  }
-
-  const firstNode = editorJson.content?.[0];
-  return firstNode?.type === "htmlTemplate" && firstNode.attrs?.html === editorHtml;
 }
 
 function responseForCustomPrompt(input: string): { message: string; html: string } {
@@ -126,6 +108,27 @@ function responseForCustomPrompt(input: string): { message: string; html: string
   };
 }
 
+function extractEditableHtml(html: string) {
+  if (!isStandaloneHtmlDocument(html)) {
+    return html;
+  }
+
+  const parser = new DOMParser();
+  const document = parser.parseFromString(html, "text/html");
+  return document.body.innerHTML.trim();
+}
+
+function replaceStandaloneBodyHtml(documentHtml: string, bodyHtml: string) {
+  if (!isStandaloneHtmlDocument(documentHtml)) {
+    return bodyHtml;
+  }
+
+  const parser = new DOMParser();
+  const document = parser.parseFromString(documentHtml, "text/html");
+  document.body.innerHTML = bodyHtml;
+  return `<!DOCTYPE html>\n${document.documentElement.outerHTML}`;
+}
+
 function PromptPill({ prompt, onSelect }: { prompt: DemoPrompt; onSelect: (prompt: DemoPrompt) => void }) {
   return (
     <button
@@ -144,22 +147,22 @@ function PromptPill({ prompt, onSelect }: { prompt: DemoPrompt; onSelect: (promp
 
 function FormattingToolbar({
   disabled,
-  onPreview,
-  onEdit,
   mode,
-  onExportHtml,
+  onEdit,
   onExportDocx,
+  onExportHtml,
+  onPreview,
   onSetAlign,
   onToggleBold,
   onToggleBullet,
   onToggleHeading,
 }: {
   disabled: boolean;
-  onPreview: () => void;
-  onEdit: () => void;
   mode: ViewMode;
-  onExportHtml: () => void;
+  onEdit: () => void;
   onExportDocx: () => void;
+  onExportHtml: () => void;
+  onPreview: () => void;
   onSetAlign: (align: "left" | "center" | "right") => void;
   onToggleBold: () => void;
   onToggleBullet: () => void;
@@ -208,122 +211,161 @@ function FormattingToolbar({
   );
 }
 
-export function Workspace() {
+const editorTheme = {
+  text: {
+    bold: "lexical-text-bold",
+  },
+};
+
+function EditorHandlePlugin({ onReady }: { onReady: (editor: LexicalEditor) => void }) {
+  const [editor] = useLexicalComposerContext();
+
+  useEffect(() => {
+    onReady(editor);
+  }, [editor, onReady]);
+
+  return null;
+}
+
+function LexicalDocumentEditor({
+  value,
+  onChange,
+  onReady,
+}: {
+  value: string;
+  onChange: (html: string) => void;
+  onReady: (editor: LexicalEditor) => void;
+}) {
+  const [editor, setEditor] = useState<LexicalEditor | null>(null);
+  const lastSyncedHtmlRef = useRef("");
+  const isApplyingExternalRef = useRef(false);
+
+  const initialConfig = useMemo(
+    () => ({
+      namespace: "draftroom-lexical",
+      theme: editorTheme,
+      nodes: [HeadingNode, QuoteNode, ListNode, ListItemNode],
+      onError(error: Error) {
+        throw error;
+      },
+    }),
+    []
+  );
+
+  useEffect(() => {
+    if (!editor || value === lastSyncedHtmlRef.current) {
+      return;
+    }
+
+    isApplyingExternalRef.current = true;
+    editor.update(() => {
+      const root = $getRoot();
+      root.clear();
+
+      if (value.trim()) {
+        const parser = new DOMParser();
+        const document = parser.parseFromString(value, "text/html");
+        const nodes = $generateNodesFromDOM(editor, document);
+
+        root.select();
+
+        if (nodes.length > 0) {
+          $insertNodes(nodes);
+        }
+      }
+
+      if ($getRoot().getChildrenSize() === 0) {
+        $getRoot().append($createParagraphNode());
+      }
+    });
+
+    lastSyncedHtmlRef.current = value;
+    queueMicrotask(() => {
+      isApplyingExternalRef.current = false;
+    });
+  }, [editor, value]);
+
+  return (
+    <LexicalComposer initialConfig={initialConfig}>
+      <EditorHandlePlugin
+        onReady={(instance) => {
+          setEditor(instance);
+          onReady(instance);
+        }}
+      />
+      <div className="relative min-h-[640px]">
+        <RichTextPlugin
+          contentEditable={
+            <ContentEditable
+              aria-placeholder="Start drafting here or run a demo action from the chat pane."
+              placeholder={<></>}
+              className="lexical-editor min-h-[640px] px-8 py-8 text-[15px] leading-7 text-[#f6f1e8] focus:outline-none md:px-12 md:py-10"
+            />
+          }
+          placeholder={
+            <div className="lexical-placeholder px-8 py-8 text-[15px] text-[#718198] md:px-12 md:py-10">
+              Start drafting here or run a demo action from the chat pane.
+            </div>
+          }
+          ErrorBoundary={LexicalErrorBoundary}
+        />
+        <HistoryPlugin />
+        <ListPlugin />
+        <OnChangePlugin
+          onChange={(editorState, instance) => {
+            editorState.read(() => {
+              const html = $generateHtmlFromNodes(instance, null);
+              lastSyncedHtmlRef.current = html;
+
+              if (isApplyingExternalRef.current) {
+                return;
+              }
+
+              onChange(html);
+            });
+          }}
+        />
+      </div>
+    </LexicalComposer>
+  );
+}
+
+export function LexicalWorkspace() {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [composer, setComposer] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("preview");
   const [isPending, startTransition] = useTransition();
   const [documentHtml, setDocumentHtml] = useState(initialDocumentHtml);
+  const [editorHtml, setEditorHtml] = useState(initialDocumentHtml);
   const [title, setTitle] = useState("Prior Authorization Draft");
+  const [editor, setEditor] = useState<LexicalEditor | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const pendingEditorHtmlRef = useRef<string | null>(null);
 
   const isTemplateDocument = useMemo(() => isStandaloneHtmlDocument(documentHtml), [documentHtml]);
 
-  const editor = useEditor({
-    immediatelyRender: false,
-    extensions: [
-      StarterKit,
-      Placeholder.configure({
-        placeholder: "Start drafting here or run a demo action from the chat pane.",
-      }),
-      TextAlign.configure({
-        types: ["heading", "paragraph"],
-      }),
-      HtmlTemplateNode,
-    ],
-    editorProps: {
-      attributes: {
-        class:
-          "tiptap min-h-[640px] px-8 py-8 text-[15px] leading-7 text-[#f6f1e8] focus:outline-none md:px-12 md:py-10",
-      },
-    },
-    content: createEditorContent(initialDocumentHtml),
-    onUpdate: ({ editor: instance }) => {
-      const json = instance.getJSON() as { content?: Array<{ type?: string; attrs?: { html?: string; title?: string } }> };
-      const firstNode = json.content?.[0];
-
-      if (firstNode?.type === "htmlTemplate" && typeof firstNode.attrs?.html === "string") {
-        setDocumentHtml(firstNode.attrs.html);
-        setTitle(extractTitle(firstNode.attrs.html));
-        return;
-      }
-
-      const html = instance.getHTML();
-      setDocumentHtml(html);
-      setTitle(extractTitle(html));
-    },
-  });
-
-  const syncEditorContent = useCallback(
-    (nextHtml: string) => {
-      pendingEditorHtmlRef.current = nextHtml;
-
-      if (!editor) {
-        return;
-      }
-
-      queueMicrotask(() => {
-        if (!editor || editor.isDestroyed) {
-          return;
-        }
-
-        if (pendingEditorHtmlRef.current !== nextHtml) {
-          return;
-        }
-
-        const currentHtml = editor.getHTML();
-        const currentJson = editor.getJSON() as { content?: Array<{ type?: string; attrs?: { html?: string } }> };
-
-        if (editorContainsTemplateHtml(nextHtml, currentJson)) {
-          pendingEditorHtmlRef.current = null;
-          return;
-        }
-
-        if (!isStandaloneHtmlDocument(nextHtml) && currentHtml === nextHtml) {
-          pendingEditorHtmlRef.current = null;
-          return;
-        }
-
-        editor.commands.setContent(createEditorContent(nextHtml), {
-          emitUpdate: false,
-        });
-        pendingEditorHtmlRef.current = null;
-      });
-    },
-    [editor]
-  );
-
-  useEffect(() => {
-    if (!editor || !pendingEditorHtmlRef.current) {
-      return;
-    }
-
-    syncEditorContent(pendingEditorHtmlRef.current);
-  }, [editor, syncEditorContent]);
-
   const stats = useMemo(() => {
-    const text = documentHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const text = editorHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     const words = text ? text.split(" ").length : 0;
     const chars = text.length;
 
     return { words, chars };
-  }, [documentHtml]);
+  }, [editorHtml]);
 
-  const applyAssistantResult = (userText: string, assistantText: string, nextHtml: string) => {
+  const applyAssistantResult = useCallback((userText: string, assistantText: string, nextHtml: string) => {
     setMessages((current) => [
       ...current,
       createMessage("user", userText),
       createMessage("assistant", assistantText),
     ]);
     setDocumentHtml(nextHtml);
+    setEditorHtml(nextHtml);
     setTitle(extractTitle(nextHtml));
     setViewMode("preview");
-    syncEditorContent(nextHtml);
-  };
+  }, []);
 
-  const applyImportedTemplate = (html: string, userText: string, assistantText: string) => {
+  const applyImportedTemplate = useCallback((html: string, userText: string, assistantText: string) => {
     const sanitizedHtml = sanitizeImportedHtml(html);
+    const nextEditorHtml = extractEditableHtml(sanitizedHtml);
 
     setMessages((current) => [
       ...current,
@@ -331,10 +373,10 @@ export function Workspace() {
       createMessage("assistant", assistantText),
     ]);
     setDocumentHtml(sanitizedHtml);
+    setEditorHtml(nextEditorHtml);
     setTitle(extractTitle(sanitizedHtml));
     setViewMode("edit");
-    syncEditorContent(sanitizedHtml);
-  };
+  }, []);
 
   const handlePromptSelect = (prompt: DemoPrompt) => {
     startTransition(() => {
@@ -346,8 +388,8 @@ export function Workspace() {
     startTransition(() => {
       applyImportedTemplate(
         attachedResumeTemplateHtml,
-        "Load the attached two-column resume HTML inside the editor.",
-        "Loaded the two-column HTML as a rendered template block inside TipTap. It stays visually faithful to the original layout and can be previewed or exported from here."
+        "Load the attached two-column HTML inside the editor.",
+        "Loaded the two-column HTML into the Lexical workspace. The preview preserves the full document and the editor exposes the body content for inline rich-text editing."
       );
     });
   };
@@ -369,7 +411,7 @@ export function Workspace() {
       applyImportedTemplate(
         html,
         `Import HTML file: ${file.name}`,
-        `Imported ${file.name} into TipTap as a rendered HTML template block.`
+        `Imported ${file.name} into the Lexical workspace.`
       );
     });
 
@@ -390,56 +432,47 @@ export function Workspace() {
     });
   };
 
+  const handleEditorChange = useCallback((nextEditorHtml: string) => {
+    setEditorHtml(nextEditorHtml);
+    setDocumentHtml((currentDocumentHtml) => {
+      const nextDocumentHtml = isStandaloneHtmlDocument(currentDocumentHtml)
+        ? replaceStandaloneBodyHtml(currentDocumentHtml, nextEditorHtml)
+        : nextEditorHtml;
+
+      setTitle(extractTitle(nextDocumentHtml));
+      return nextDocumentHtml;
+    });
+  }, []);
+
   const handleExportHtml = () => {
     exportHtmlDocument(documentHtml, title);
   };
 
   const handleExportDocx = async () => {
-    await exportDocxDocument(documentHtml, title);
+    await exportDocxDocument(editorHtml, title);
   };
 
-  const dispatchTemplateCommand = useCallback(
-    (detail: { command: "bold" | "bulletList" | "heading1" | "align"; align?: "left" | "center" | "right" }) => {
-      if (!isTemplateDocument) {
-        return false;
-      }
-
-      window.dispatchEvent(new CustomEvent(TEMPLATE_COMMAND_EVENT, { detail }));
-      return true;
-    },
-    [isTemplateDocument]
-  );
-
   const handleToggleHeading = () => {
-    if (dispatchTemplateCommand({ command: "heading1" })) {
+    if (!editor) {
       return;
     }
 
-    editor?.chain().focus().toggleHeading({ level: 1 }).run();
+    editor.update(() => {
+      const selection = $getSelection();
+      $setBlocksType(selection, () => $createHeadingNode("h1"));
+    });
   };
 
   const handleToggleBold = () => {
-    if (dispatchTemplateCommand({ command: "bold" })) {
-      return;
-    }
-
-    editor?.chain().focus().toggleBold().run();
+    editor?.dispatchCommand(FORMAT_TEXT_COMMAND, "bold");
   };
 
   const handleToggleBullet = () => {
-    if (dispatchTemplateCommand({ command: "bulletList" })) {
-      return;
-    }
-
-    editor?.chain().focus().toggleBulletList().run();
+    editor?.dispatchCommand(INSERT_UNORDERED_LIST_COMMAND, undefined);
   };
 
   const handleSetAlign = (align: "left" | "center" | "right") => {
-    if (dispatchTemplateCommand({ command: "align", align })) {
-      return;
-    }
-
-    editor?.chain().focus().setTextAlign(align).run();
+    editor?.dispatchCommand(FORMAT_ELEMENT_COMMAND, align satisfies ElementFormatType);
   };
 
   return (
@@ -466,16 +499,16 @@ export function Workspace() {
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-2">
             <Link
-              href="/lexical"
+              href="/"
               className={cn(
                 buttonVariants({ variant: "outline", size: "sm" }),
                 "border-white/10 bg-black/20 text-[#f6f1e8] hover:bg-white/8"
               )}
             >
-              Open Lexical page
+              Open TipTap page
             </Link>
+            <Badge variant="secondary" className="bg-white/6 text-[#d7deea]">Lexical editor</Badge>
             <Badge variant="secondary" className="bg-white/6 text-[#d7deea]">No auth</Badge>
-            <Badge variant="secondary" className="bg-white/6 text-[#d7deea]">No speech-to-text</Badge>
             <Badge variant="secondary" className="bg-white/6 text-[#d7deea]">OpenRouter-ready later</Badge>
           </div>
         </header>
@@ -491,7 +524,7 @@ export function Workspace() {
                   <div>
                     <p className="text-sm font-medium text-[#fff8ef]">Simulated assistant</p>
                     <p className="mt-1 text-sm leading-6 text-[#95a3b6]">
-                      Demo actions mutate the draft instantly so you can evaluate the workflow before wiring in a real model provider.
+                      Demo actions mutate the draft instantly so you can compare the same workflow with Lexical instead of TipTap.
                     </p>
                   </div>
                 </div>
@@ -610,7 +643,7 @@ export function Workspace() {
               </div>
               {isTemplateDocument ? (
                 <p className="mt-3 text-sm text-[#95a3b6]">
-                  Full HTML template loaded. TipTap shows it as a rendered block so the two-column structure stays intact.
+                  Full HTML template loaded. Preview keeps the full document shell while Lexical edits the body content for a faster rich-text experience.
                 </p>
               ) : null}
             </div>
@@ -632,7 +665,7 @@ export function Workspace() {
                       />
                     )
                   ) : (
-                    <EditorContent editor={editor} />
+                    <LexicalDocumentEditor value={editorHtml} onChange={handleEditorChange} onReady={setEditor} />
                   )}
                 </div>
               </div>
