@@ -63,6 +63,8 @@ import { cn } from "@/lib/utils";
 
 type ViewMode = "preview" | "edit";
 
+const TEMPLATE_SCOPE_CLASS = "lexical-template-scope";
+
 function createMessage(role: ChatMessage["role"], content: string): ChatMessage {
   return {
     id: `${role}-${crypto.randomUUID()}`,
@@ -127,6 +129,71 @@ function replaceStandaloneBodyHtml(documentHtml: string, bodyHtml: string) {
   const document = parser.parseFromString(documentHtml, "text/html");
   document.body.innerHTML = bodyHtml;
   return `<!DOCTYPE html>\n${document.documentElement.outerHTML}`;
+}
+
+function scopeCssSelector(selector: string, scopeSelector: string) {
+  const trimmedSelector = selector.trim();
+
+  if (!trimmedSelector) {
+    return "";
+  }
+
+  if (trimmedSelector === "*") {
+    return `${scopeSelector} *`;
+  }
+
+  if (/^(html|body|:root)$/i.test(trimmedSelector)) {
+    return scopeSelector;
+  }
+
+  const replacedSelector = trimmedSelector
+    .replace(/:root/gi, scopeSelector)
+    .replace(/\bhtml\b/gi, scopeSelector)
+    .replace(/\bbody\b/gi, scopeSelector)
+    .replace(new RegExp(`${scopeSelector}\\s+${scopeSelector}`, "g"), scopeSelector)
+    .trim();
+
+  if (replacedSelector.includes(scopeSelector)) {
+    return replacedSelector;
+  }
+
+  return `${scopeSelector} ${replacedSelector}`;
+}
+
+function scopeCssText(css: string, scopeSelector: string) {
+  return css.replace(/(^|}|\s)([^{}@]+)\{/g, (match, prefix, selectors) => {
+    const trimmedSelectors = selectors.trim();
+
+    if (!trimmedSelectors || trimmedSelectors.startsWith("from") || trimmedSelectors.startsWith("to") || /\d+%$/.test(trimmedSelectors)) {
+      return match;
+    }
+
+    const scopedSelectors = trimmedSelectors
+      .split(",")
+      .map((selector: string) => scopeCssSelector(selector, scopeSelector))
+      .filter(Boolean)
+      .join(", ");
+
+    return `${prefix}${scopedSelectors} {`;
+  });
+}
+
+function extractScopedTemplateStyles(html: string) {
+  if (!isStandaloneHtmlDocument(html)) {
+    return "";
+  }
+
+  const styleMatches = Array.from(html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi));
+  const styleText = styleMatches
+    .map((match) => match[1]?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n");
+
+  if (!styleText) {
+    return "";
+  }
+
+  return scopeCssText(styleText, `.${TEMPLATE_SCOPE_CLASS}`);
 }
 
 function PromptPill({ prompt, onSelect }: { prompt: DemoPrompt; onSelect: (prompt: DemoPrompt) => void }) {
@@ -228,10 +295,14 @@ function EditorHandlePlugin({ onReady }: { onReady: (editor: LexicalEditor) => v
 }
 
 function LexicalDocumentEditor({
+  isTemplateDocument,
+  scopedStyles,
   value,
   onChange,
   onReady,
 }: {
+  isTemplateDocument: boolean;
+  scopedStyles: string;
   value: string;
   onChange: (html: string) => void;
   onReady: (editor: LexicalEditor) => void;
@@ -293,14 +364,22 @@ function LexicalDocumentEditor({
           onReady(instance);
         }}
       />
-      <div className="relative min-h-[640px]">
+      <div className={cn("relative min-h-[640px]", isTemplateDocument && "overflow-auto bg-white text-[#17120d]")}>
+        {isTemplateDocument && scopedStyles ? <style>{scopedStyles}</style> : null}
         <RichTextPlugin
           contentEditable={
-            <ContentEditable
-              aria-placeholder="Start drafting here or run a demo action from the chat pane."
-              placeholder={<></>}
-              className="lexical-editor min-h-[640px] px-8 py-8 text-[15px] leading-7 text-[#f6f1e8] focus:outline-none md:px-12 md:py-10"
-            />
+            <div className={cn(isTemplateDocument && TEMPLATE_SCOPE_CLASS)}>
+              <ContentEditable
+                aria-placeholder="Start drafting here or run a demo action from the chat pane."
+                placeholder={<></>}
+                className={cn(
+                  "lexical-editor focus:outline-none",
+                  isTemplateDocument
+                    ? "lexical-template-editor min-h-[680px] bg-white text-[#17120d]"
+                    : "min-h-[640px] px-8 py-8 text-[15px] leading-7 text-[#f6f1e8] md:px-12 md:py-10"
+                )}
+              />
+            </div>
           }
           placeholder={
             <div className="lexical-placeholder px-8 py-8 text-[15px] text-[#718198] md:px-12 md:py-10">
@@ -342,6 +421,7 @@ export function LexicalWorkspace() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const isTemplateDocument = useMemo(() => isStandaloneHtmlDocument(documentHtml), [documentHtml]);
+  const scopedTemplateStyles = useMemo(() => extractScopedTemplateStyles(documentHtml), [documentHtml]);
 
   const stats = useMemo(() => {
     const text = editorHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -643,7 +723,7 @@ export function LexicalWorkspace() {
               </div>
               {isTemplateDocument ? (
                 <p className="mt-3 text-sm text-[#95a3b6]">
-                  Full HTML template loaded. Preview keeps the full document shell while Lexical edits the body content for a faster rich-text experience.
+                  Full HTML template loaded. Lexical now keeps the template CSS scoped into the editor so imported layouts stay visually close to the original while remaining editable.
                 </p>
               ) : null}
             </div>
@@ -665,7 +745,13 @@ export function LexicalWorkspace() {
                       />
                     )
                   ) : (
-                    <LexicalDocumentEditor value={editorHtml} onChange={handleEditorChange} onReady={setEditor} />
+                    <LexicalDocumentEditor
+                      isTemplateDocument={isTemplateDocument}
+                      scopedStyles={scopedTemplateStyles}
+                      value={editorHtml}
+                      onChange={handleEditorChange}
+                      onReady={setEditor}
+                    />
                   )}
                 </div>
               </div>

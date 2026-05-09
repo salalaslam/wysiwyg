@@ -167,6 +167,14 @@
   outline: none;
 }
 
+.lexical-template-scope {
+  min-height: 680px;
+}
+
+.lexical-template-editor {
+  min-height: 680px;
+}
+
 .lexical-placeholder {
   inset: 0;
   pointer-events: none;
