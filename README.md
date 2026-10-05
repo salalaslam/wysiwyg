@@ -1,3 +1,9 @@
+# Draftroom
+
+Compares Tiptap, Lexical, CKEditor and TinyMCE on the same HTML resume template.
+
+> The HTML to DOCX/PPTX export work from this project continues in [ooxify](https://github.com/salalaslam/ooxify), a library and CLI that turns HTML into editable PowerPoint and Word files.
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
