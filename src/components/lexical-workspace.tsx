@@ -587,6 +587,24 @@ export function LexicalWorkspace() {
             >
               Open TipTap page
             </Link>
+            <Link
+              href="/ckeditor"
+              className={cn(
+                buttonVariants({ variant: "outline", size: "sm" }),
+                "border-white/10 bg-black/20 text-[#f6f1e8] hover:bg-white/8"
+              )}
+            >
+              Open CKEditor page
+            </Link>
+            <Link
+              href="/tinymce"
+              className={cn(
+                buttonVariants({ variant: "outline", size: "sm" }),
+                "border-white/10 bg-black/20 text-[#f6f1e8] hover:bg-white/8"
+              )}
+            >
+              Open TinyMCE page
+            </Link>
             <Badge variant="secondary" className="bg-white/6 text-[#d7deea]">Lexical editor</Badge>
             <Badge variant="secondary" className="bg-white/6 text-[#d7deea]">No auth</Badge>
             <Badge variant="secondary" className="bg-white/6 text-[#d7deea]">OpenRouter-ready later</Badge>
