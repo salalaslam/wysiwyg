@@ -1,3 +1,5 @@
+@import "ckeditor5/ckeditor5.css";
+@import "tinymce/skins/ui/oxide/skin.min.css";
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
@@ -173,6 +175,20 @@
 
 .lexical-template-editor {
   min-height: 680px;
+}
+
+.comparison-editor-surface .ck-editor__editable_inline {
+  min-height: 680px;
+  padding: 2rem 2.5rem;
+}
+
+.comparison-editor-surface .ck.ck-editor {
+  border-radius: 22px;
+  overflow: hidden;
+}
+
+.comparison-editor-surface .tox {
+  border: 0;
 }
 
 .lexical-placeholder {
